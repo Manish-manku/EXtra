@@ -173,40 +173,52 @@ class ExperimentRunner:
             else:
                 empirical_h = 0.0
 
-            # Certified min-entropy — derived from test-pool cross-basis error
-            # rate, NOT from output bias.  This is the genuine security metric.
-            certified_list  = [m.get('h_min_certified', m.get('h_min_trusted', 0.0))
-                               for m in metadata_list]
-            avg_h_cert      = float(np.mean(certified_list)) if certified_list else 0.0
+            # Global EAT-certified metrics are reported in the final summary entry.
+            final_summary = metadata_list[-1]
+            h_total_eat = final_summary.get('h_total_eat', 0.0)
+            certified_output_bits = final_summary.get('certified_output_bits', len(output_bits))
+            delta_eat = final_summary.get('delta_eat', 0.0)
+            blocks_used = final_summary.get('blocks_used', max(len(metadata_list) - 1, 0))
+            sum_f_ei = final_summary.get('sum_f_ei', 0.0)
 
-            # EAT-corrected total from the last block (inter-block non-IID penalty)
-            eat_total       = metadata_list[-1].get('eat_total_certified', None)
-            eat_eps_corr    = metadata_list[-1].get('eat_eps_corr_used', 0.0)
-
-            extraction_list = [m.get('extraction_rate', 0.0) for m in metadata_list]
-            avg_rate        = float(np.mean(extraction_list)) if extraction_list else 0.0
+            # Per-block progression (exclude final summary row).
+            h_total_progression = []
+            delta_progression = []
+            for meta in metadata_list[:-1]:
+                h_total_progression.append(meta.get('h_total_eat', 0.0))
+                delta_progression.append(
+                    meta.get('sum_f_ei', 0.0) - meta.get('h_total_eat', 0.0)
+                )
 
             results[scenario_name] = {
                 'empirical_h_output':   empirical_h,       # uniformity, NOT security
-                'certified_h_min':      avg_h_cert,        # genuine security bound
-                'eat_total_certified':  eat_total,         # EAT inter-block corrected
-                'eat_eps_corr':         eat_eps_corr,
-                'extraction_rate':      avg_rate,
+                'h_total_eat':          h_total_eat,
+                'certified_output_bits': certified_output_bits,
+                'delta_eat':            delta_eat,
+                'blocks_used':          blocks_used,
+                'sum_f_ei':             sum_f_ei,
+                'h_total_progression':  h_total_progression,
+                'delta_progression':    delta_progression,
                 'output_bits':          len(output_bits),
                 'expected_bits':        n_bits,
                 # Legacy keys for backward compat with plots
-                'certified_entropy':    avg_h_cert,
+                'certified_entropy':    h_total_eat,
             }
 
-            print(f"  Certified H_min (security bound): {avg_h_cert:.4f} bits/bit"
-                  f"  ← from test-pool cross-basis error rate")
+            print(f"  Global H_total (EAT):               {h_total_eat:.4f} bits")
+            print(f"  Certified output bits:              {certified_output_bits}")
+            print(f"  Δ_EAT correction:                   {delta_eat:.4f}")
+            print(f"  Σ f(e_i):                           {sum_f_ei:.4f}")
+            print(f"  Blocks used:                        {blocks_used}")
             print(f"  Empirical H(output) (uniformity):  {empirical_h:.4f} bits/bit"
                   f"  ← NOT a security measure")
-            if eat_total is not None:
-                print(f"  EAT-corrected total:              {eat_total:.4f} bits"
-                      f"  (ε_corr={eat_eps_corr:.4f})")
-            print(f"  Extraction rate: {avg_rate:.4f}  |  "
-                  f"Output bits: {len(output_bits)} / {n_bits} requested")
+
+            self._plot_eat_progression(
+                scenario_name=scenario_name,
+                h_total_progression=h_total_progression,
+                delta_progression=delta_progression,
+                certified_output_bits=certified_output_bits,
+            )
 
         # Save results
         with open(self.output_dir / "data" / "experiment_2_entropy_certification.json", 'w') as f:
@@ -501,9 +513,9 @@ class ExperimentRunner:
         # Use new key names; fall back to legacy keys for resilience
         empirical = [results[s].get('empirical_h_output',
                      results[s].get('empirical_entropy', 0.0)) for s in scenarios]
-        certified = [results[s].get('certified_h_min',
+        certified = [results[s].get('h_total_eat',
                      results[s].get('certified_entropy', 0.0)) for s in scenarios]
-        extraction = [results[s]['extraction_rate'] for s in scenarios]
+        certified_output = [results[s].get('certified_output_bits', 0) for s in scenarios]
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
@@ -524,11 +536,11 @@ class ExperimentRunner:
         ax1.legend(fontsize=9)
         ax1.grid(axis='y', alpha=0.3)
 
-        # Plot 2: Extraction rate derived from certified bound
-        ax2.bar(x, extraction, color='coral', alpha=0.7)
+        # Plot 2: Certified output bits from global EAT bound
+        ax2.bar(x, certified_output, color='coral', alpha=0.7)
         ax2.set_xlabel('Scenario', fontsize=12)
-        ax2.set_ylabel('Extraction Rate', fontsize=12)
-        ax2.set_title('Randomness Extraction Rate\n(from certified H_min, not output bias)',
+        ax2.set_ylabel('Certified Output Bits', fontsize=12)
+        ax2.set_title('Globally Certified Output Bits\n(from final EAT summary)',
                       fontsize=12, fontweight='bold')
         ax2.set_xticks(x)
         ax2.set_xticklabels(scenarios, rotation=45, ha='right')
@@ -539,6 +551,43 @@ class ExperimentRunner:
         plt.close()
 
         print(f"\n  Saved figure: experiment_2_entropy_comparison.png")
+
+    def _plot_eat_progression(
+        self,
+        scenario_name: str,
+        h_total_progression: List[float],
+        delta_progression: List[float],
+        certified_output_bits: int,
+    ):
+        """Plot per-block EAT progression and final certified output for one scenario."""
+        safe_name = scenario_name.replace(" ", "_")
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(h_total_progression)
+        plt.title("Global Certified Entropy (EAT)")
+        plt.xlabel("Blocks")
+        plt.ylabel("H_total")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "figures" / f"experiment_2_{safe_name}_h_total_progression.png", dpi=300)
+        plt.close()
+
+        plt.figure(figsize=(6, 5))
+        plt.bar(["Certified Output"], [certified_output_bits], color='steelblue', alpha=0.8)
+        plt.title("Globally Certified Output Bits")
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "figures" / f"experiment_2_{safe_name}_certified_output_bits.png", dpi=300)
+        plt.close()
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(delta_progression, color='darkorange')
+        plt.title("EAT Correction Term (Δ_EAT)")
+        plt.xlabel("Blocks")
+        plt.ylabel("Δ_EAT")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "figures" / f"experiment_2_{safe_name}_delta_eat_progression.png", dpi=300)
+        plt.close()
 
     def _plot_attack_response(self, results: Dict):
         """Plot system response to attacks."""
