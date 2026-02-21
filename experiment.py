@@ -255,27 +255,28 @@ class ExperimentRunner:
             source = QuantumSourceSimulator(params, seed=42)
             te_qrng = TrustEnhancedQRNG(block_size=10000)
 
-            # Process multiple blocks to see adaptation
+            output_bits, metadata_list = te_qrng.generate_certified_random_bits(
+                n_bits=n_bits,
+                source_simulator=source
+            )
+
+            final_summary = metadata_list[-1]
+
             block_results = []
 
-            for block_idx in range(5):
-                block  = source.generate_block(10000)
-                output, metadata = te_qrng.process_block(
-                    block.bits, block.bases, block.raw_signal
-                )
-
+            for idx, meta in enumerate(metadata_list[:-1]):
                 block_results.append({
-                    'block':           block_idx,
-                    'trust_score':     metadata['trust_score'],
-                    'h_min_certified': metadata.get('h_min_certified',
-                                       metadata.get('h_min_trusted', 0.0)),
-                    'extraction_rate': metadata['extraction_rate'],
-                    'output_bits':     metadata['output_bits'],
+                    'block': idx,
+                    'trust_score': meta['trust_score'],
+                    'h_total_eat': meta.get('h_total_eat', 0.0),
+                    'delta_eat': meta.get('sum_f_ei', 0.0) - meta.get('h_total_eat', 0.0),
+                    'extraction_rate': meta['extraction_rate'],
+                    'certified_output_bits': final_summary.get('certified_output_bits', 0)
                 })
 
-                print(f"  Block {block_idx}: Trust={metadata['trust_score']:.4f}, "
-                      f"H_cert={metadata.get('h_min_certified', metadata.get('h_min_trusted',0)):.4f}, "
-                      f"Rate={metadata['extraction_rate']:.4f}")
+                print(f"  Block {idx}: Trust={meta['trust_score']:.4f}, "
+                      f"H_total={meta.get('h_total_eat', 0.0):.4f}, "
+                      f"Rate={meta['extraction_rate']:.4f}")
 
             results[scenario_name] = block_results
 
@@ -343,17 +344,18 @@ class ExperimentRunner:
             te_quality = self._compute_quality_score(te_output)
             si_quality = self._compute_quality_score(si_output)
 
+            te_blocks = te_metadata[:-1]
+            si_blocks = si_metadata[:-1]
+
             results[scenario_name] = {
                 'te_output_bits':   len(te_output),
                 'si_output_bits':   len(si_output),
                 'te_quality_score': te_quality,
                 'si_quality_score': si_quality,
-                'te_avg_trust':     np.mean([m['trust_score'] for m in te_metadata]),
+                'te_avg_trust':     np.mean([m['trust_score'] for m in te_blocks]),
                 # h_min_certified is the genuine security bound (cross-basis error rate)
-                'te_avg_h_cert':    np.mean([m.get('h_min_certified',
-                                              m.get('h_min_trusted', 0)) for m in te_metadata]),
-                'si_avg_h_cert':    np.mean([m.get('h_min_certified',
-                                              m.get('h_min_trusted', 0)) for m in si_metadata]),
+                'te_avg_h_cert':    np.mean([m.get('h_min_certified', 0) for m in te_blocks]),
+                'si_avg_h_cert':    np.mean([m.get('h_min_certified', 0) for m in si_blocks]),
             }
 
             print(f"  TE-SI-QRNG:        {len(te_output)} bits, quality={te_quality:.4f}")
@@ -370,6 +372,11 @@ class ExperimentRunner:
     def experiment_5_temporal_adaptation(self, n_blocks: int = 20):
         """
         Experiment 5: Test temporal adaptation to changing source quality.
+
+        NOTE:
+        Experiment 5 analyzes block-wise adaptation behavior.
+        This is diagnostic-level behavior (trust and extraction rate),
+        not the global composable EAT-certified entropy.
 
         Simulates a source that degrades and recovers over time.
         """
@@ -590,17 +597,15 @@ class ExperimentRunner:
         plt.close()
 
     def _plot_attack_response(self, results: Dict):
-        """Plot system response to attacks."""
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        """Plot system response to attacks (supports any number of scenarios)."""
+
+        n_scenarios = len(results)
+        rows = (n_scenarios + 1) // 2
+        fig, axes = plt.subplots(rows, 2, figsize=(14, 4 * rows))
+        axes = np.array(axes).flatten()
 
         for idx, (scenario_name, blocks) in enumerate(results.items()):
-            row = idx // 2
-            col = idx % 2
-
-            if row >= 2:
-                break
-
-            ax = axes[row, col]
+            ax = axes[idx]
 
             block_nums = [b['block'] for b in blocks]
             trust_scores = [b['trust_score'] for b in blocks]
@@ -609,18 +614,22 @@ class ExperimentRunner:
             ax.plot(block_nums, trust_scores, 'o-', label='Trust Score', linewidth=2)
             ax.plot(block_nums, extraction_rates, 's-', label='Extraction Rate', linewidth=2)
 
-            ax.set_xlabel('Block Number', fontsize=10)
-            ax.set_ylabel('Score / Rate', fontsize=10)
-            ax.set_title(f'{scenario_name.replace("_", " ").title()}', fontsize=12, fontweight='bold')
+            ax.set_xlabel('Block Number')
+            ax.set_ylabel('Score / Rate')
+            ax.set_title(scenario_name.replace("_", " ").title(), fontweight='bold')
             ax.legend()
             ax.grid(alpha=0.3)
             ax.set_ylim([0, 1.05])
+
+        # Hide unused axes
+        for j in range(idx + 1, len(axes)):
+            fig.delaxes(axes[j])
 
         plt.tight_layout()
         plt.savefig(self.output_dir / "figures" / "experiment_3_attack_response.png", dpi=300)
         plt.close()
 
-        print(f"\n  Saved figure: experiment_3_attack_response.png")
+        print("\n  Saved figure: experiment_3_attack_response.png")
 
     def _plot_comparison(self, results: Dict):
         """Plot TE-SI-QRNG vs standard SI-QRNG."""
